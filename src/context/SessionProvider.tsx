@@ -5,6 +5,7 @@ import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { fetchMyProfile, signOut as authSignOut, type StaffProfile } from "@/lib/auth";
 import { clearDeviceCache } from "@/lib/api";
+import { store } from "@/lib/storage";
 
 /**
  * Holds who is signed in. Rules:
@@ -21,6 +22,8 @@ interface SessionState {
   loading: boolean;
   session: Session | null;
   profile: StaffProfile | null;
+  /** true while the profile is being fetched for the first time after login */
+  profileLoading: boolean;
   refreshProfile: () => Promise<void>;
   signOut: () => Promise<void>;
 }
@@ -33,7 +36,7 @@ const PROFILE_CACHE_KEY = "adr.profile.v1";
 
 function readCachedProfile(): StaffProfile | null {
   try {
-    const raw = localStorage.getItem(PROFILE_CACHE_KEY);
+    const raw = store.getItem(PROFILE_CACHE_KEY);
     return raw ? (JSON.parse(raw) as StaffProfile) : null;
   } catch {
     return null;
@@ -42,8 +45,8 @@ function readCachedProfile(): StaffProfile | null {
 
 function writeCachedProfile(profile: StaffProfile | null): void {
   try {
-    if (profile) localStorage.setItem(PROFILE_CACHE_KEY, JSON.stringify(profile));
-    else localStorage.removeItem(PROFILE_CACHE_KEY);
+    if (profile) store.setItem(PROFILE_CACHE_KEY, JSON.stringify(profile));
+    else store.removeItem(PROFILE_CACHE_KEY);
   } catch {
     // storage unavailable -- the app still works, just without the instant start
   }
@@ -53,6 +56,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<StaffProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
   const sessionRef = useRef<Session | null>(null);
 
   const signOut = useCallback(async () => {
@@ -103,8 +107,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!next) {
         writeCachedProfile(null);
         setProfile(null);
+      } else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
+        // Use cached profile instantly so the app opens without waiting
+        const cached = readCachedProfile();
+        if (cached) {
+          setProfile(cached);
+          void refreshProfile();
+        } else {
+          // First ever login on this device — fetch profile but mark loading
+          // so the app can show a spinner inside rather than freezing on login.
+          setProfileLoading(true);
+          void refreshProfile().finally(() => setProfileLoading(false));
+        }
       }
-      else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") void refreshProfile();
     });
 
     const appStateSub = AppState.addEventListener("change", (state) => {
@@ -119,8 +134,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [refreshProfile]);
 
   const value = useMemo(
-    () => ({ loading, session, profile, refreshProfile, signOut }),
-    [loading, session, profile, refreshProfile, signOut]
+    () => ({ loading, session, profile, profileLoading, refreshProfile, signOut }),
+    [loading, session, profile, profileLoading, refreshProfile, signOut]
   );
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
